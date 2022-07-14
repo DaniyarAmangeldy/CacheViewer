@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">CacheViewer</string>
+    <string name="message_give_access">To continue use an app, please give access to read external storage</string>
+    <string name="open_permission">Open Permission</string>
+</resources>
