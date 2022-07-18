@@ -5,6 +5,6 @@ sealed interface CacheSource {
 
     object Telegram: CacheSource {
         override val cacheDirPath: String
-            get() = "DCIM"
+            get() = "Telegram"
     }
 }
