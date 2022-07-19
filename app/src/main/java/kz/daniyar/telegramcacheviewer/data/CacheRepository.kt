@@ -7,8 +7,9 @@ import kz.daniyar.telegramcacheviewer.utils.getAllFilesRecursive
 class CacheRepository {
 
     fun getCacheList(source: CacheSource): List<File> {
-        val storageDir = Environment.getExternalStorageDirectory()
-        val cacheDir = File(storageDir, source.cacheDirPath)
+        val externalStorageDir = Environment.getExternalStorageDirectory()
+        val applicationDataDir = File("$externalStorageDir/Android/media", source.packageName)
+        val cacheDir = File(applicationDataDir, source.cacheDirPath)
         if (!cacheDir.exists()) {
             return emptyList()
         }
