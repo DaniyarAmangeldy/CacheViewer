@@ -1,14 +1,17 @@
 package kz.daniyar.telegramcacheviewer.presentation
 
 import android.Manifest
+import android.Manifest.permission.READ_EXTERNAL_STORAGE
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.storage.StorageManager
 import android.provider.Settings
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
@@ -22,6 +25,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.Button
+import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
@@ -29,53 +33,92 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat.shouldShowRequestPermissionRationale
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlin.properties.Delegates
 import kz.daniyar.telegramcacheviewer.R
+import kz.daniyar.telegramcacheviewer.domain.entity.Cache
 import kz.daniyar.telegramcacheviewer.utils.EnvironmentCompat
 import org.koin.androidx.viewmodel.ext.android.viewModel
+
 
 class MainActivity : AppCompatActivity() {
 
     private val viewModel: MainViewModel by viewModel()
-    private var storagePermissionRequestLauncher: ActivityResultLauncher<String> by Delegates.notNull()
+    private var legacyReadExternalStoragePermissionRequestLauncher: ActivityResultLauncher<String> by Delegates.notNull()
+    private var requestPermissionDeniedPermanently: Boolean = false
+    private var readExternalStoragePermissionRequestLauncher: ActivityResultLauncher<Intent> by Delegates.notNull()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             MainActivityContent()
         }
-        storagePermissionRequestLauncher = registerForActivityResult(
+        legacyReadExternalStoragePermissionRequestLauncher = registerForActivityResult(
             ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                return@registerForActivityResult
+            }
+            val shouldShowRequestPermissionRationale = shouldShowRequestPermissionRationale(READ_EXTERNAL_STORAGE)
+            requestPermissionDeniedPermanently = !granted && !shouldShowRequestPermissionRationale
+            if (granted) {
+                viewModel.onLoadCacheRequest()
+            }
+        }
+        readExternalStoragePermissionRequestLauncher = registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
         ) {
-            // skip handle here, will check permission onResume
+            val uri = it.data?.data ?: return@registerForActivityResult
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            viewModel.onLoadCacheRequest(uri)
         }
     }
 
     @Composable
     private fun MainActivityContent() {
-        val cacheList by viewModel.cacheList.collectAsState()
+        val uiState by viewModel.uiState.collectAsState()
+        val event by viewModel.event.collectAsState(Event.Idle)
         val lifecycleOwner = LocalLifecycleOwner.current
-        var hasManageStoragePermission by remember { mutableStateOf(hasReadStoragePermission()) }
-        if (hasManageStoragePermission) {
-            CacheList(cacheList)
-        } else {
-            RequestPermissionContent(::onRequestPermissionClick)
+
+        when (val uiState = uiState) {
+            is UiState.CacheList -> CacheList(uiState.cacheList)
+            UiState.CacheLoading -> ListLoading()
+            UiState.PermissionRequired -> RequestPermissionContent(::onRequestPermissionClick)
+            UiState.Idle -> ListLoading()
+        }
+
+        LaunchedEffect(event) {
+            when (event) {
+                Event.CheckPermission -> {
+                    if (!hasReadStoragePermission()) {
+                        viewModel.onNoReadStoragePermission()
+                    } else {
+                        viewModel.onLoadCacheRequest()
+                    }
+                }
+                Event.Idle -> return@LaunchedEffect
+            }
+            viewModel.onEventHandled()
         }
         DisposableEffect(lifecycleOwner) {
             val observer = LifecycleEventObserver { _, event ->
                 if (event == Lifecycle.Event.ON_RESUME) {
-                    hasManageStoragePermission = hasReadStoragePermission()
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        return@LifecycleEventObserver
+                    }
+                    if (!hasReadStoragePermission()) {
+                        viewModel.onNoReadStoragePermission()
+                    } else {
+                        viewModel.onLoadCacheRequest()
+                    }
                 }
             }
             lifecycleOwner.lifecycle.addObserver(observer)
@@ -84,16 +127,10 @@ class MainActivity : AppCompatActivity() {
                 lifecycleOwner.lifecycle.removeObserver(observer)
             }
         }
-
-        LaunchedEffect(hasManageStoragePermission) {
-            if (hasManageStoragePermission) {
-                viewModel.onLoadCacheRequest()
-            }
-        }
     }
 
     @Composable
-    private fun CacheList(cacheList: List<CacheDVO>) {
+    private fun CacheList(cacheList: List<Cache>) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -104,6 +141,13 @@ class MainActivity : AppCompatActivity() {
                     item = item
                 )
             }
+        }
+    }
+
+    @Composable
+    private fun ListLoading() {
+        Box(modifier = Modifier.fillMaxSize()) {
+            CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
         }
     }
 
@@ -135,7 +179,7 @@ class MainActivity : AppCompatActivity() {
 
     @Composable
     private fun CacheItem(
-        item: CacheDVO,
+        item: Cache,
         modifier: Modifier = Modifier
     ) {
         Column(
@@ -169,18 +213,36 @@ class MainActivity : AppCompatActivity() {
             tryNavigateToSettingsPermission()
             return
         }
-        if (!shouldShowRequestPermissionRationale(Manifest.permission.READ_EXTERNAL_STORAGE)) {
+        if (requestPermissionDeniedPermanently) {
             openAppSettings()
             return
         }
-        storagePermissionRequestLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+        legacyReadExternalStoragePermissionRequestLauncher.launch(READ_EXTERNAL_STORAGE)
     }
 
     private fun tryNavigateToSettingsPermission() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             return
         }
-        startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val intent = getRequestReadExternalStorageIntent()
+            readExternalStoragePermissionRequestLauncher.launch(intent)
+            return
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun getRequestReadExternalStorageIntent(): Intent {
+        val storageService = getSystemService(STORAGE_SERVICE) as StorageManager
+        val intent = storageService.primaryStorageVolume.createOpenDocumentTreeIntent()
+        val startDir = "Android%2Fdata";
+        var uri = intent.getParcelableExtra<Uri>("android.provider.extra.INITIAL_URI")
+        var scheme = uri.toString()
+        scheme = scheme.replace("/root/", "/document/")
+        scheme += "%3A$startDir"
+        uri = Uri.parse(scheme)
+        intent.putExtra("android.provider.extra.INITIAL_URI", uri)
+        return intent
     }
 
     private fun openAppSettings() {
